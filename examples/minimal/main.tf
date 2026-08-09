@@ -9,6 +9,10 @@ terraform {
 }
 
 provider "azurerm" {
+  # Matches the deployment stubs: bootstrap.sh owns provider registration, so
+  # Terraform should not attempt it. See deployments/dev/demo/main.tf.
+  resource_provider_registrations = "none"
+
   features {
     key_vault {
       purge_soft_delete_on_destroy    = true

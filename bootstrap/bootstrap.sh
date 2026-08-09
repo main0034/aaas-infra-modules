@@ -50,8 +50,51 @@ CONTAINER_STATE="tfstate"
 DEFAULT_BRANCH="${DEFAULT_BRANCH:-master}"
 
 AUDIENCE="api://AzureADTokenExchange"
-SUBJECT_PR="repo:${GITHUB_OWNER}/${DEPLOY_REPO}:pull_request"
-SUBJECT_MAIN="repo:${GITHUB_OWNER}/${DEPLOY_REPO}:ref:refs/heads/${DEFAULT_BRANCH}"
+
+###############################################################################
+# OIDC subject format
+#
+# GitHub repositories created after 15 July 2026 use "immutable subject
+# claims": the owner and repository numeric IDs are embedded in the sub claim
+# and CANNOT be removed, even with claim customisation.
+#
+#   old: repo:owner/repo:pull_request
+#   new: repo:owner@40392502/repo@1328777566:pull_request
+#
+# The '@' separator is safe because it cannot appear in a GitHub username or
+# repository name. Azure matches the subject as an exact string, so a
+# credential written in the old format simply never matches, and the failure
+# (AADSTS700213) reads like a configuration mistake rather than a format
+# change.
+#
+# We therefore ask GitHub what the IDs are rather than assuming either format.
+###############################################################################
+
+if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+  echo "==> Resolving GitHub owner/repo IDs for the OIDC subject"
+  OWNER_ID=$(gh api "repos/${GITHUB_OWNER}/${DEPLOY_REPO}" --jq '.owner.id' 2>/dev/null || echo "")
+  REPO_ID=$(gh api "repos/${GITHUB_OWNER}/${DEPLOY_REPO}" --jq '.id' 2>/dev/null || echo "")
+else
+  OWNER_ID=""
+  REPO_ID=""
+  echo "==> gh CLI not available or not authenticated; falling back to the legacy subject format."
+  echo "    If the repo uses immutable claims this WILL fail at token exchange."
+  echo "    Set OWNER_ID and REPO_ID manually to override."
+fi
+
+OWNER_ID="${OWNER_ID_OVERRIDE:-$OWNER_ID}"
+REPO_ID="${REPO_ID_OVERRIDE:-$REPO_ID}"
+
+if [[ -n "${OWNER_ID}" && -n "${REPO_ID}" ]]; then
+  REPO_SEGMENT="repo:${GITHUB_OWNER}@${OWNER_ID}/${DEPLOY_REPO}@${REPO_ID}"
+  echo "    Using immutable subject format: ${REPO_SEGMENT}"
+else
+  REPO_SEGMENT="repo:${GITHUB_OWNER}/${DEPLOY_REPO}"
+  echo "    Using legacy subject format: ${REPO_SEGMENT}"
+fi
+
+SUBJECT_PR="${REPO_SEGMENT}:pull_request"
+SUBJECT_MAIN="${REPO_SEGMENT}:ref:refs/heads/${DEFAULT_BRANCH}"
 
 echo "==> Selecting subscription: ${SUBSCRIPTION_ID}"
 
@@ -159,10 +202,23 @@ create_sp () {
 }
 
 add_fed_cred () {
-  local app_id="$1" cred_name="$2" subject="$3"
-  if az ad app federated-credential list --id "${app_id}" --query "[?name=='${cred_name}']" -o tsv | grep -q .; then
-    echo "    federated credential ${cred_name} already exists, skipping"
-    return
+  local app_id="$1" cred_name="$2" subject="$3" existing_subject
+
+  existing_subject=$(az ad app federated-credential list --id "${app_id}" \
+    --query "[?name=='${cred_name}'].subject | [0]" -o tsv 2>/dev/null || echo "")
+
+  if [[ -n "${existing_subject}" ]]; then
+    if [[ "${existing_subject}" == "${subject}" ]]; then
+      echo "    federated credential ${cred_name} already correct, skipping"
+      return
+    fi
+    # Subjects are matched exactly by Entra, so a stale one is not merely
+    # redundant - it is the thing that will keep failing. Replace it.
+    echo "    federated credential ${cred_name} has stale subject, replacing"
+    echo "      was: ${existing_subject}"
+    echo "      now: ${subject}"
+    az ad app federated-credential delete \
+      --id "${app_id}" --federated-credential-id "${cred_name}" --output none
   fi
   az ad app federated-credential create --id "${app_id}" --parameters "{
     \"name\": \"${cred_name}\",
