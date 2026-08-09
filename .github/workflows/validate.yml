@@ -1,0 +1,60 @@
+name: validate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+          terraform_wrapper: false
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive
+
+      - name: terraform init (module)
+        working-directory: modules/app-stack
+        run: terraform init -backend=false
+
+      - name: terraform validate (module)
+        working-directory: modules/app-stack
+        run: terraform validate
+
+      - name: terraform init (example)
+        working-directory: examples/minimal
+        run: terraform init -backend=false
+
+      - name: terraform validate (example)
+        working-directory: examples/minimal
+        run: terraform validate
+
+  tflint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: latest
+      - run: tflint --init
+      - run: tflint --recursive --minimum-failure-severity=error
+
+  checkov:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: bridgecrewio/checkov-action@master
+        with:
+          directory: modules/app-stack
+          framework: terraform
+          quiet: true
+          soft_fail: true # POC: report only. Flip to false once the findings are triaged.
