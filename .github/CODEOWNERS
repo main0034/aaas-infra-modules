@@ -1,0 +1,10 @@
+# This entire repository is a guardrail.
+#
+# aaas-deployments carries a mix of agent-written data and human-owned rules,
+# so its CODEOWNERS file is selective. Here there is no such mix: the module
+# defines what infrastructure is permitted to exist, and the agent has no
+# legitimate reason to open a PR against any path in this repo.
+#
+# So the pattern is everything.
+
+* @main0034

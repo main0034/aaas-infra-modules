@@ -43,9 +43,15 @@ CONTAINER_STATE="tfstate"
 # SA_STATE is derived from the canonical subscription GUID and is therefore
 # computed after the subscription is resolved, not here.
 
+# Default branch. This is NOT cosmetic: it becomes the subject of the OIDC
+# federated credential, and Azure matches that string exactly. A mismatch
+# fails at token exchange with "no matching federated identity record found",
+# which reads like a permissions problem rather than a typo.
+DEFAULT_BRANCH="${DEFAULT_BRANCH:-master}"
+
 AUDIENCE="api://AzureADTokenExchange"
 SUBJECT_PR="repo:${GITHUB_OWNER}/${DEPLOY_REPO}:pull_request"
-SUBJECT_MAIN="repo:${GITHUB_OWNER}/${DEPLOY_REPO}:ref:refs/heads/main"
+SUBJECT_MAIN="repo:${GITHUB_OWNER}/${DEPLOY_REPO}:ref:refs/heads/${DEFAULT_BRANCH}"
 
 echo "==> Selecting subscription: ${SUBSCRIPTION_ID}"
 
@@ -177,7 +183,7 @@ echo "==> Creating apply service principal (write)"
 APPLY_APP_ID=$(create_sp "sp-${PREFIX}-apply-${ENVIRONMENT}")
 az ad sp create --id "${APPLY_APP_ID}" --output none 2>/dev/null || true
 APPLY_SP_ID=$(az ad sp show --id "${APPLY_APP_ID}" --query id -o tsv)
-add_fed_cred "${APPLY_APP_ID}" "github-main" "${SUBJECT_MAIN}"
+add_fed_cred "${APPLY_APP_ID}" "github-${DEFAULT_BRANCH}" "${SUBJECT_MAIN}"
 
 ###############################################################################
 # 3. RBAC

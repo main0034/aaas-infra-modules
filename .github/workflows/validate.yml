@@ -3,7 +3,7 @@ name: validate
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [master]
 
 permissions:
   contents: read
@@ -58,3 +58,30 @@ jobs:
           framework: terraform
           quiet: true
           soft_fail: true # POC: report only. Flip to false once the findings are triaged.
+
+  # The single check to mark as required in branch protection, mirroring the
+  # 'gate' job in aaas-deployments. One name to configure in both repos, and
+  # adding a job here never means revisiting the protection settings.
+  gate:
+    needs: [terraform, tflint, checkov]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluate results
+        run: |
+          set -euo pipefail
+          echo "terraform: ${{ needs.terraform.result }}"
+          echo "tflint:    ${{ needs.tflint.result }}"
+          echo "checkov:   ${{ needs.checkov.result }}"
+
+          for result in \
+            "${{ needs.terraform.result }}" \
+            "${{ needs.tflint.result }}" \
+            "${{ needs.checkov.result }}"; do
+            case "$result" in
+              success|skipped) ;;
+              *) echo "::error::A required job did not succeed."; exit 1 ;;
+            esac
+          done
+
+          echo "All checks passed."
