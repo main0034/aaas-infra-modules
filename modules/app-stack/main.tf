@@ -112,8 +112,8 @@ resource "azurerm_private_dns_zone_virtual_network_link" "postgres" {
 ###############################################################################
 
 resource "random_password" "postgres_admin" {
-  length      = 32
-  special     = true
+  length  = 32
+  special = true
   # Azure rejects several punctuation characters in the admin password.
   override_special = "!#$%*()-_=+[]{}<>:?"
   min_lower        = 2
@@ -127,11 +127,11 @@ resource "azurerm_postgresql_flexible_server" "this" {
   resource_group_name = azurerm_resource_group.this.name
   location            = azurerm_resource_group.this.location
 
-  version                = var.postgres_version
-  sku_name               = var.postgres_sku
-  storage_mb             = var.postgres_storage_mb
-  backup_retention_days  = var.postgres_backup_retention_days
-  zone                   = "1"
+  version               = var.postgres_version
+  sku_name              = var.postgres_sku
+  storage_mb            = var.postgres_storage_mb
+  backup_retention_days = var.postgres_backup_retention_days
+  zone                  = "1"
 
   administrator_login    = "psqladmin"
   administrator_password = random_password.postgres_admin.result
