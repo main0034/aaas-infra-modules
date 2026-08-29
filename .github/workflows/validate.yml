@@ -45,8 +45,18 @@ jobs:
       - uses: terraform-linters/setup-tflint@v4
         with:
           tflint_version: latest
+
       - run: tflint --init
-      - run: tflint --recursive --minimum-failure-severity=error
+
+      # Explicit per-directory runs rather than --recursive. With --recursive
+      # tflint re-discovers configuration in each directory it visits, so a
+      # single root .tflint.hcl is not reliably applied and failures are hard
+      # to attribute. --chdir with an explicit --config removes the ambiguity.
+      - name: tflint (module)
+        run: tflint --chdir=modules/app-stack --config="$(pwd)/.tflint.hcl" --minimum-failure-severity=error
+
+      - name: tflint (example)
+        run: tflint --chdir=examples/minimal --config="$(pwd)/.tflint.hcl" --minimum-failure-severity=error
 
   checkov:
     runs-on: ubuntu-latest
@@ -55,9 +65,9 @@ jobs:
       - uses: bridgecrewio/checkov-action@master
         with:
           directory: modules/app-stack
-          framework: terraform
+          config_file: .checkov.yml
           quiet: true
-          soft_fail: true # POC: report only. Flip to false once the findings are triaged.
+          soft_fail: true # POC: report only. Flip to false once .checkov.yml skips are revisited.
 
   # The single check to mark as required in branch protection, mirroring the
   # 'gate' job in aaas-deployments. One name to configure in both repos, and

@@ -1,0 +1,49 @@
+# Checkov configuration.
+#
+# Currently soft_fail in CI, so these findings are advisory. The skips below
+# exist so the annotation list reflects genuine problems rather than choices
+# already made deliberately - an alert list nobody reads is worse than no
+# alert list.
+#
+# Every entry here is a POC decision with an expiry. Before this carries
+# anything real, revisit all of them and flip soft_fail to false.
+
+framework:
+  - terraform
+
+skip-check:
+  # Deliberate: purge protection blocks clean teardown, and destroy.yml is
+  # run frequently during POC iteration. MUST be re-enabled before any real
+  # data exists.
+  - CKV_AZURE_110  # Key Vault purge protection
+  - CKV_AZURE_42   # Key Vault recoverable
+
+  # Key Vault is reached over the public endpoint by Terraform running in
+  # GitHub-hosted CI. Locking it to the VNet would require a self-hosted
+  # runner or a private endpoint plus CI egress, which is out of scope for
+  # the POC. Access is RBAC-controlled and the secret is only readable by the
+  # app's managed identity.
+  - CKV_AZURE_189  # Key Vault public network access
+  - CKV_AZURE_109  # Key Vault firewall rules
+  - CKV2_AZURE_32  # Private endpoint for Key Vault
+
+  # Postgres uses VNet integration (delegated subnet + private DNS) rather
+  # than a private endpoint. Both give a private-only server; checkov only
+  # recognises the private endpoint pattern. public_network_access_enabled is
+  # false, which is the property that actually matters.
+  - CKV2_AZURE_57
+
+  # Geo-redundant backup roughly doubles backup cost for a throwaway dev
+  # database. Deliberate.
+  - CKV_AZURE_136
+
+  # NSGs on the delegated subnets. Both subnets are service-delegated and
+  # carry no general-purpose workloads; adding NSGs is worthwhile hardening
+  # but not a POC blocker.
+  - CKV2_AZURE_31
+
+  # The connection string is generated and rotated by recreating the stack.
+  # An expiry date on a secret nothing rotates would create a hard failure at
+  # a random future date, which is worse than the finding.
+  - CKV_AZURE_41   # secret expiration date
+  - CKV_AZURE_114  # secret content_type
