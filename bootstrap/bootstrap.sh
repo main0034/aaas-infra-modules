@@ -94,7 +94,21 @@ else
 fi
 
 SUBJECT_PR="${REPO_SEGMENT}:pull_request"
-SUBJECT_MAIN="${REPO_SEGMENT}:ref:refs/heads/${DEFAULT_BRANCH}"
+
+# The apply and destroy jobs declare `environment: dev`. When a job references
+# a GitHub Environment, the OIDC subject becomes ':environment:<name>' and NOT
+# ':ref:refs/heads/<branch>' - the environment claim replaces the ref claim
+# rather than supplementing it.
+#
+# This is easy to get wrong because the workflow still only runs on the
+# default branch, so a branch-scoped credential looks correct and fails with
+# AADSTS700213 as though it were a permissions problem.
+#
+# Both credentials are created: the environment one is what apply/destroy
+# actually present today, and the branch one keeps any future non-environment
+# job on the default branch working.
+SUBJECT_ENV="${REPO_SEGMENT}:environment:${ENVIRONMENT}"
+SUBJECT_BRANCH="${REPO_SEGMENT}:ref:refs/heads/${DEFAULT_BRANCH}"
 
 echo "==> Selecting subscription: ${SUBSCRIPTION_ID}"
 
@@ -239,7 +253,8 @@ echo "==> Creating apply service principal (write)"
 APPLY_APP_ID=$(create_sp "sp-${PREFIX}-apply-${ENVIRONMENT}")
 az ad sp create --id "${APPLY_APP_ID}" --output none 2>/dev/null || true
 APPLY_SP_ID=$(az ad sp show --id "${APPLY_APP_ID}" --query id -o tsv)
-add_fed_cred "${APPLY_APP_ID}" "github-${DEFAULT_BRANCH}" "${SUBJECT_MAIN}"
+add_fed_cred "${APPLY_APP_ID}" "github-environment-${ENVIRONMENT}" "${SUBJECT_ENV}"
+add_fed_cred "${APPLY_APP_ID}" "github-${DEFAULT_BRANCH}" "${SUBJECT_BRANCH}"
 
 ###############################################################################
 # 3. RBAC
