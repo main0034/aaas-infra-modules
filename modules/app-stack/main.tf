@@ -29,6 +29,11 @@ locals {
   apps_subnet_cidr = cidrsubnet(var.vnet_address_space, 7, 0) # /23 when vnet is /16
   db_subnet_cidr   = cidrsubnet(var.vnet_address_space, 8, 2) # /24 when vnet is /16
 
+  # A registry credential is configured only when BOTH a username and a
+  # password are supplied. Either both or neither - a half-configured
+  # credential is always an error, never a valid intermediate state.
+  use_registry_credential = var.registry_username != "" && var.registry_password != ""
+
   tags = merge(var.tags, {
     managedBy   = "terraform"
     module      = "app-stack"
@@ -291,8 +296,16 @@ resource "azurerm_container_app" "this" {
     identity            = azurerm_user_assigned_identity.app.id
   }
 
+  # Gate on the PASSWORD, not the username.
+  #
+  # Keying this off registry_username meant that setting a username without a
+  # password produced a secret with an empty value, which Azure rejects with
+  # ContainerAppSecretInvalid ("value or keyVaultUrl and identity should be
+  # provided") - roughly eight minutes into an apply, after Postgres has
+  # already been built. The precondition below turns that into a plan-time
+  # error instead.
   dynamic "secret" {
-    for_each = var.registry_username != "" ? [1] : []
+    for_each = local.use_registry_credential ? [1] : []
     content {
       name  = "registry-password"
       value = var.registry_password
@@ -300,7 +313,7 @@ resource "azurerm_container_app" "this" {
   }
 
   dynamic "registry" {
-    for_each = var.registry_username != "" ? [1] : []
+    for_each = local.use_registry_credential ? [1] : []
     content {
       server               = var.registry_server
       username             = var.registry_username
@@ -376,6 +389,18 @@ resource "azurerm_container_app" "this" {
     precondition {
       condition     = var.max_replicas >= var.min_replicas
       error_message = "max_replicas must be greater than or equal to min_replicas."
+    }
+
+    precondition {
+      # Catches the missing-secret case at plan time rather than eight
+      # minutes into an apply.
+      condition     = var.registry_username == "" || var.registry_password != ""
+      error_message = "registry_username is set to \"${var.registry_username}\" but registry_password is empty. Either set the GHCR_READ_TOKEN secret on the deployments repo (it is passed as TF_VAR_registry_password), or make the container package public and set registry_username to \"\" in terraform.tfvars.json."
+    }
+
+    precondition {
+      condition     = var.registry_password == "" || var.registry_username != ""
+      error_message = "registry_password is set but registry_username is empty. Both are required to configure a private registry pull, or neither."
     }
   }
 
