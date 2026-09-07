@@ -2,8 +2,8 @@
 # app-stack
 #
 # One opinionated composite module: a Container App fronting a private
-# Postgres Flexible Server, with the connection string brokered through Key
-# Vault and read by a user-assigned managed identity.
+# Postgres Flexible Server, authenticated with a user-assigned managed
+# identity and Entra ID tokens. There is no database password anywhere.
 #
 # Ordering that matters (and that breaks silently if you get it wrong):
 #   1. Private DNS zone must be linked to the VNet BEFORE the Postgres server
@@ -14,8 +14,7 @@
 #      explicitly, or Azure's implicit default shows as a perpetual diff on
 #      every subsequent plan.
 #
-# The connection string is deliberately NOT held in Key Vault - see the long
-# note further down for why that was tried and removed.
+# Key Vault was tried and removed. See the note above the Postgres server.
 ###############################################################################
 
 data "azurerm_client_config" "current" {}
@@ -116,17 +115,21 @@ resource "azurerm_private_dns_zone_virtual_network_link" "postgres" {
 # Postgres Flexible Server (private access only)
 ###############################################################################
 
-resource "random_password" "postgres_admin" {
-  length  = 32
-  special = true
-  # Azure rejects several punctuation characters in the admin password.
-  override_special = "!#$%*()-_=+[]{}<>:?"
-  min_lower        = 2
-  min_upper        = 2
-  min_numeric      = 2
-  min_special      = 2
-}
-
+# NOTE: there is deliberately no password anywhere in this module.
+#
+# Postgres is configured for Entra ID authentication ONLY. The application's
+# managed identity is the database administrator, and the app obtains a
+# short-lived token at connect time. Consequences:
+#
+#   - no credential in Terraform state, Key Vault, or a Container App secret
+#   - nothing for `terraform plan` to read, so plan works under a read-only
+#     identity (the previous designs failed on Key Vault getSecret and then
+#     on Container Apps listSecrets - the same problem twice, because the
+#     secret still existed)
+#   - credentials rotate hourly on their own
+#
+# This is the third iteration of this decision. The first two moved the
+# secret; only removing it actually solved the problem.
 resource "azurerm_postgresql_flexible_server" "this" {
   name                = "psql-${local.base}-${local.suffix}"
   resource_group_name = azurerm_resource_group.this.name
@@ -138,16 +141,16 @@ resource "azurerm_postgresql_flexible_server" "this" {
   backup_retention_days = var.postgres_backup_retention_days
   zone                  = "1"
 
-  administrator_login    = "psqladmin"
-  administrator_password = random_password.postgres_admin.result
-
   # Private access: no public endpoint, VNet-integrated.
   public_network_access_enabled = false
   delegated_subnet_id           = azurerm_subnet.database.id
   private_dns_zone_id           = azurerm_private_dns_zone.postgres.id
 
+  # Entra ID only. With password_auth_enabled = false, administrator_login
+  # and administrator_password are omitted entirely - there is no local admin
+  # account to leak.
   authentication {
-    password_auth_enabled         = true
+    password_auth_enabled         = false
     active_directory_auth_enabled = true
     tenant_id                     = data.azurerm_client_config.current.tenant_id
   }
@@ -172,6 +175,19 @@ resource "azurerm_postgresql_flexible_server_database" "this" {
   lifecycle {
     prevent_destroy = false # POC: allow teardown. Revisit before any real data lands.
   }
+}
+
+# The app's managed identity IS the database administrator. For the POC this
+# is deliberately coarse - a real deployment would create a least-privilege
+# role via SQL. But it means the app can authenticate with a token and no
+# password exists anywhere in the system.
+resource "azurerm_postgresql_flexible_server_active_directory_administrator" "app" {
+  server_name         = azurerm_postgresql_flexible_server.this.name
+  resource_group_name = azurerm_resource_group.this.name
+  tenant_id           = data.azurerm_client_config.current.tenant_id
+  object_id           = azurerm_user_assigned_identity.app.principal_id
+  principal_name      = azurerm_user_assigned_identity.app.name
+  principal_type      = "ServicePrincipal"
 }
 
 resource "azurerm_postgresql_flexible_server_configuration" "ssl" {
@@ -222,15 +238,6 @@ resource "azurerm_user_assigned_identity" "app" {
 # already knows.
 ###############################################################################
 
-locals {
-  db_connection_string = format(
-    "postgresql://%s:%s@%s:5432/%s?sslmode=require",
-    "psqladmin",
-    urlencode(random_password.postgres_admin.result),
-    azurerm_postgresql_flexible_server.this.fqdn,
-    var.database_name,
-  )
-}
 
 ###############################################################################
 # Observability
@@ -287,14 +294,14 @@ resource "azurerm_container_app" "this" {
     identity_ids = [azurerm_user_assigned_identity.app.id]
   }
 
-  # Connection string is resolved from Key Vault at revision start using the
-  # app identity. The value never appears in this repo or in plan output.
-  # Write-only through the API, so no data-plane read is required on refresh
-  # and plan works under a read-only identity. See the note above.
-  secret {
-    name  = "db-connection-string"
-    value = local.db_connection_string
-  }
+  # No database secret exists. The app authenticates to Postgres with an
+  # Entra token from its managed identity at connect time.
+  #
+  # Beware when extending this module: adding ANY secret here reintroduces
+  # the plan-time 403, because the provider calls
+  # Microsoft.App/containerApps/listSecrets on refresh and the plan identity
+  # is Reader-only. The registry credential below is the one remaining case,
+  # and it exists only when pulling from a private registry.
 
   # Gate on the PASSWORD, not the username.
   #
@@ -342,9 +349,30 @@ resource "azurerm_container_app" "this" {
       cpu    = var.cpu
       memory = var.memory
 
+      # Connection details, not credentials. The app combines these with a
+      # token from its managed identity - see AGENT.md in the app template.
       env {
-        name        = "DATABASE_URL"
-        secret_name = "db-connection-string"
+        name  = "PGHOST"
+        value = azurerm_postgresql_flexible_server.this.fqdn
+      }
+
+      env {
+        name  = "PGDATABASE"
+        value = var.database_name
+      }
+
+      # Entra principal name of the managed identity, used as the Postgres
+      # username.
+      env {
+        name  = "PGUSER"
+        value = azurerm_user_assigned_identity.app.name
+      }
+
+      # Required so DefaultAzureCredential picks the USER-assigned identity
+      # rather than searching for a system-assigned one.
+      env {
+        name  = "AZURE_CLIENT_ID"
+        value = azurerm_user_assigned_identity.app.client_id
       }
 
       env {

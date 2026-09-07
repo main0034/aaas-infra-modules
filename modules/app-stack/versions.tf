@@ -6,9 +6,7 @@ terraform {
       source  = "hashicorp/azurerm"
       version = "~> 4.20"
     }
-    random = {
-      source  = "hashicorp/random"
-      version = "~> 3.6"
-    }
+    # No random provider: there is no password to generate. See the note
+    # above azurerm_postgresql_flexible_server in main.tf.
   }
 }
