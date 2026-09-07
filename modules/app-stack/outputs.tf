@@ -23,11 +23,6 @@ output "database_name" {
   value       = azurerm_postgresql_flexible_server_database.this.name
 }
 
-output "key_vault_uri" {
-  description = "Key Vault URI holding the connection string."
-  value       = azurerm_key_vault.this.vault_uri
-}
-
 output "app_identity_principal_id" {
   description = "Principal ID of the app's user-assigned managed identity."
   value       = azurerm_user_assigned_identity.app.principal_id

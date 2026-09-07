@@ -10,9 +10,12 @@
 #      is created, or the app resolves the public name and cannot connect.
 #   2. The Postgres delegated subnet must be empty at creation and cannot be
 #      re-delegated afterwards.
-#   3. Key Vault RBAC assignments need a propagation delay before the secret
-#      write succeeds - hence the time_sleep below. Removing it produces an
-#      intermittent 403 on first apply.
+#   3. The Container App environment must declare its workload profile
+#      explicitly, or Azure's implicit default shows as a perpetual diff on
+#      every subsequent plan.
+#
+# The connection string is deliberately NOT held in Key Vault - see the long
+# note further down for why that was tried and removed.
 ###############################################################################
 
 data "azurerm_client_config" "current" {}
@@ -22,9 +25,6 @@ locals {
 
   # Globally-unique names need a deterministic suffix.
   suffix = substr(sha1("${var.name}-${var.environment}-${data.azurerm_client_config.current.subscription_id}"), 0, 6)
-
-  # Key Vault names are limited to 24 chars and cannot contain underscores.
-  kv_name = substr("kv-${replace(var.name, "-", "")}-${local.suffix}", 0, 24)
 
   apps_subnet_cidr = cidrsubnet(var.vnet_address_space, 7, 0) # /23 when vnet is /16
   db_subnet_cidr   = cidrsubnet(var.vnet_address_space, 8, 2) # /24 when vnet is /16
@@ -192,59 +192,44 @@ resource "azurerm_user_assigned_identity" "app" {
 }
 
 ###############################################################################
-# Key Vault
+# Database connection string
+#
+# Deliberately NOT stored in Key Vault, after the POC showed what that cost.
+#
+# The original design put the connection string in a Key Vault secret and had
+# the container app resolve it via a Key Vault reference. That is the textbook
+# shape, and it was wrong here for three reasons:
+#
+#  1. `azurerm_key_vault_secret` requires a DATA-PLANE read on every refresh.
+#     The plan identity is Reader-only by design, so every plan failed with
+#     ForbiddenByRbac. Fixing that means granting the plan identity permission
+#     to read secrets - while it runs Terraform against unreviewed PR content.
+#     That is a materially worse security position than the one Key Vault was
+#     supposed to provide.
+#  2. It bought nothing in practice. Terraform constructs the connection
+#     string, so the value is in Terraform state either way. Key Vault was
+#     protecting a secret that was already written to the state blob.
+#  3. It cost a 60-second RBAC propagation sleep, two role assignments, and a
+#     vault whose soft-delete complicates teardown.
+#
+# The connection string is now passed directly as a Container App secret.
+# Container App secrets are write-only through the API, so no data-plane read
+# is needed and plan works under a read-only identity.
+#
+# For the real product, where secrets should be rotatable independently of
+# Terraform, revisit this - but solve it by taking the value out of Terraform
+# entirely, not by putting Key Vault back in front of a value Terraform
+# already knows.
 ###############################################################################
 
-resource "azurerm_key_vault" "this" {
-  name                = local.kv_name
-  resource_group_name = azurerm_resource_group.this.name
-  location            = azurerm_resource_group.this.location
-  tenant_id           = data.azurerm_client_config.current.tenant_id
-  sku_name            = "standard"
-
-  # Renamed from enable_rbac_authorization; the old name is removed in
-  # provider v5.
-  rbac_authorization_enabled = true
-  purge_protection_enabled   = false # POC: allows clean teardown.
-  soft_delete_retention_days = 7
-
-  tags = local.tags
-}
-
-# The identity running Terraform needs data-plane rights to write the secret.
-resource "azurerm_role_assignment" "kv_deployer" {
-  scope                = azurerm_key_vault.this.id
-  role_definition_name = "Key Vault Secrets Officer"
-  principal_id         = data.azurerm_client_config.current.object_id
-}
-
-# The app identity needs read access to resolve the Key Vault reference.
-resource "azurerm_role_assignment" "kv_app_reader" {
-  scope                = azurerm_key_vault.this.id
-  role_definition_name = "Key Vault Secrets User"
-  principal_id         = azurerm_user_assigned_identity.app.principal_id
-}
-
-# Azure RBAC is eventually consistent. Without a pause the first secret write
-# intermittently fails with 403.
-resource "time_sleep" "kv_rbac_propagation" {
-  depends_on      = [azurerm_role_assignment.kv_deployer]
-  create_duration = "60s"
-}
-
-resource "azurerm_key_vault_secret" "db_connection_string" {
-  name         = "db-connection-string"
-  key_vault_id = azurerm_key_vault.this.id
-
-  value = format(
+locals {
+  db_connection_string = format(
     "postgresql://%s:%s@%s:5432/%s?sslmode=require",
     "psqladmin",
     urlencode(random_password.postgres_admin.result),
     azurerm_postgresql_flexible_server.this.fqdn,
     var.database_name,
   )
-
-  depends_on = [time_sleep.kv_rbac_propagation]
 }
 
 ###############################################################################
@@ -273,6 +258,20 @@ resource "azurerm_container_app_environment" "this" {
   infrastructure_subnet_id       = azurerm_subnet.apps.id
   internal_load_balancer_enabled = false
 
+  # Azure adds a default "Consumption" workload profile whether or not one is
+  # declared. Leaving it out made every subsequent plan show an in-place
+  # update removing it - a perpetual diff that has nothing to do with the
+  # change being deployed, and which would make the "a redeploy is a one-line
+  # diff" property untrue in practice.
+  #
+  # Declaring it explicitly makes the config match reality.
+  workload_profile {
+    name                  = "Consumption"
+    workload_profile_type = "Consumption"
+    minimum_count         = 0
+    maximum_count         = 0
+  }
+
   tags = local.tags
 }
 
@@ -290,10 +289,11 @@ resource "azurerm_container_app" "this" {
 
   # Connection string is resolved from Key Vault at revision start using the
   # app identity. The value never appears in this repo or in plan output.
+  # Write-only through the API, so no data-plane read is required on refresh
+  # and plan works under a read-only identity. See the note above.
   secret {
-    name                = "db-connection-string"
-    key_vault_secret_id = azurerm_key_vault_secret.db_connection_string.versionless_id
-    identity            = azurerm_user_assigned_identity.app.id
+    name  = "db-connection-string"
+    value = local.db_connection_string
   }
 
   # Gate on the PASSWORD, not the username.
@@ -404,5 +404,4 @@ resource "azurerm_container_app" "this" {
     }
   }
 
-  depends_on = [azurerm_role_assignment.kv_app_reader]
 }
