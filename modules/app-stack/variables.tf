@@ -118,7 +118,7 @@ variable "max_replicas" {
 }
 
 variable "app_env" {
-  description = "Non-secret environment variables passed to the container. Never put credentials here; they belong in Key Vault."
+  description = "Non-secret environment variables passed to the container. Never put credentials here: the stack manages none, and the app authenticates with its managed identity."
   type        = map(string)
   default     = {}
 
@@ -127,7 +127,7 @@ variable "app_env" {
       for k, v in var.app_env : k
       if can(regex("(?i)(password|secret|token|key|credential|conn)", k))
     ]) == 0
-    error_message = "app_env keys must not look like secrets (password/secret/token/key/credential/conn). Secrets are provisioned through Key Vault."
+    error_message = "app_env keys must not look like secrets (password/secret/token/key/credential/conn). The stack manages no secrets; see README."
   }
 }
 
