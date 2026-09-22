@@ -33,6 +33,15 @@ locals {
   # credential is always an error, never a valid intermediate state.
   use_registry_credential = var.registry_username != "" && var.registry_password != ""
 
+  # What the migrate init container needs to reach Postgres. The app container
+  # sets the same values explicitly below; keep the two in step.
+  database_env = {
+    PGHOST          = azurerm_postgresql_flexible_server.this.fqdn
+    PGDATABASE      = var.database_name
+    PGUSER          = azurerm_user_assigned_identity.app.name
+    AZURE_CLIENT_ID = azurerm_user_assigned_identity.app.client_id
+  }
+
   tags = merge(var.tags, {
     managedBy   = "terraform"
     module      = "app-stack"
@@ -342,6 +351,44 @@ resource "azurerm_container_app" "this" {
   template {
     min_replicas = var.min_replicas
     max_replicas = var.max_replicas
+
+    # Schema migrations, run before the app container in every new replica.
+    #
+    # Same image, started with the single argument `migrate` - part of the image
+    # contract, see README. The app container starts only if this exits 0, and
+    # in Single revision mode a revision that never becomes ready takes no
+    # traffic, so a failed migration leaves the previous revision serving.
+    # (Unverified at min_replicas = 0 - see README, "Known behaviours".)
+    # Replicas starting together are safe: the migration tool locks the history
+    # table, so each migration applies exactly once and the rest are no-ops.
+    #
+    # This is the one place in the stack allowed to need the database at
+    # startup. The app container's /health contract is unchanged.
+    #
+    # Needs the managed identity at run time. Init containers only get it in a
+    # workload-profile environment on a Consumption profile (identity
+    # lifecycle defaults to All) - which is what the environment above
+    # declares. Moving to a Consumption-only or Dedicated environment would
+    # break this silently: the init container would fail to get a token.
+    #
+    # 0.25 vCPU / 0.5Gi is valid whether or not the platform counts init
+    # containers toward the app's resource total: every app size here plus
+    # this is still an allowed combination.
+    init_container {
+      name   = "migrate"
+      image  = var.container_image
+      args   = ["migrate"]
+      cpu    = 0.25
+      memory = "0.5Gi"
+
+      dynamic "env" {
+        for_each = local.database_env
+        content {
+          name  = env.key
+          value = env.value
+        }
+      }
+    }
 
     container {
       name   = var.name
