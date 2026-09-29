@@ -181,12 +181,10 @@ resource "azurerm_postgresql_flexible_server_database" "this" {
   collation = "en_US.utf8"
   charset   = "UTF8"
 
-  # Finding 23: on a fresh server the database, the Entra administrator and the
-  # SSL setting were all started in the same second. The database create
-  # succeeded in Azure while the provider saw an error, and the retry failed on
-  # "already exists - needs to be imported". A Flexible Server takes one
-  # management operation at a time, so the three are serialised: SSL setting,
-  # then administrator, then database.
+  # Serialised after the SSL setting and the administrator (v0.3.1). Not the
+  # cause of finding 23's "already exists" - that was the app creating the
+  # database itself (finding 24, see azurerm_container_app.this) - but a
+  # Flexible Server takes one management operation at a time, so it is kept.
   depends_on = [azurerm_postgresql_flexible_server_active_directory_administrator.app]
 
   lifecycle {
@@ -307,6 +305,16 @@ resource "azurerm_container_app" "this" {
   container_app_environment_id = azurerm_container_app_environment.this.id
   revision_mode                = "Single"
   tags                         = local.tags
+
+  # Finding 24: the first revision's `migrate` init container runs as soon as
+  # the app exists, retrying until its identity is the Postgres administrator.
+  # EF Core's Migrate() creates a missing database, so it made `appdb` one
+  # second before Terraform tried to, and the apply failed on "already exists".
+  # The app must not start until Terraform owns the database.
+  depends_on = [
+    azurerm_postgresql_flexible_server_database.this,
+    azurerm_postgresql_flexible_server_active_directory_administrator.app,
+  ]
 
   identity {
     type         = "UserAssigned"
