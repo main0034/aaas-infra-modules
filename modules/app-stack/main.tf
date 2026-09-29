@@ -181,6 +181,14 @@ resource "azurerm_postgresql_flexible_server_database" "this" {
   collation = "en_US.utf8"
   charset   = "UTF8"
 
+  # Finding 23: on a fresh server the database, the Entra administrator and the
+  # SSL setting were all started in the same second. The database create
+  # succeeded in Azure while the provider saw an error, and the retry failed on
+  # "already exists - needs to be imported". A Flexible Server takes one
+  # management operation at a time, so the three are serialised: SSL setting,
+  # then administrator, then database.
+  depends_on = [azurerm_postgresql_flexible_server_active_directory_administrator.app]
+
   lifecycle {
     prevent_destroy = false # POC: allow teardown. Revisit before any real data lands.
   }
@@ -197,6 +205,8 @@ resource "azurerm_postgresql_flexible_server_active_directory_administrator" "ap
   object_id           = azurerm_user_assigned_identity.app.principal_id
   principal_name      = azurerm_user_assigned_identity.app.name
   principal_type      = "ServicePrincipal"
+
+  depends_on = [azurerm_postgresql_flexible_server_configuration.ssl]
 }
 
 resource "azurerm_postgresql_flexible_server_configuration" "ssl" {
