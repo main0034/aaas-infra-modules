@@ -254,3 +254,13 @@ variable "tags" {
     error_message = "tags must include non-empty 'owner' and 'costCenter'."
   }
 }
+
+variable "module_version" {
+  description = "The app-stack release this deployment pins, without the v: the same version as the ?ref= in its source. Checked against the module's own version at plan time, and written to every resource's aaasModule tag."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[0-9]+\\.[0-9]+\\.[0-9]+$", var.module_version))
+    error_message = "module_version is a release such as 0.4.0, without the leading v."
+  }
+}
