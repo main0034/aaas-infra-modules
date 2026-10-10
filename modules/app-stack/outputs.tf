@@ -1,3 +1,8 @@
+output "module_version" {
+  description = "The app-stack release this estate runs."
+  value       = local.module_version
+}
+
 output "app_url" {
   description = "Public HTTPS URL of the container app."
   value       = "https://${azurerm_container_app.this.ingress[0].fqdn}"

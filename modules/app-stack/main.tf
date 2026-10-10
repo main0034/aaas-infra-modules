@@ -42,11 +42,21 @@ locals {
     AZURE_CLIENT_ID = azurerm_user_assigned_identity.app.client_id
   }
 
+  # What this estate runs, readable from Azure metadata alone (OQ-16): the control
+  # plane can list every estate's module version and archetype without reading
+  # any deployment's main.tf. Bump module_version in the commit that is tagged;
+  # the precondition on the resource group fails the plan of any deployment
+  # whose pinned ref disagrees with it.
+  module_version = "0.4.0"
+  archetype      = "web-app-with-data"
+
   tags = merge(var.tags, {
     managedBy   = "terraform"
     module      = "app-stack"
     environment = var.environment
     deployment  = var.name
+    aaasModule  = "app-stack@${local.module_version}"
+    archetype   = local.archetype
   })
 }
 
@@ -58,6 +68,13 @@ resource "azurerm_resource_group" "this" {
   name     = "rg-${local.base}"
   location = var.location
   tags     = local.tags
+
+  lifecycle {
+    precondition {
+      condition     = var.module_version == local.module_version
+      error_message = "The deployment asks for app-stack ${var.module_version} but this source is ${local.module_version}. The ref in main.tf and module_version must name the same release, and the release must have bumped local.module_version."
+    }
+  }
 }
 
 ###############################################################################

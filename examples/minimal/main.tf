@@ -26,7 +26,8 @@ provider "azurerm" {
 
 # Fixture used by CI to prove the module still plans. Not intended to be applied.
 module "app" {
-  source = "../../modules/app-stack"
+  source         = "../../modules/app-stack"
+  module_version = "0.4.0"
 
   name            = "example"
   environment     = "dev"

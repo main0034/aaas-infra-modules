@@ -69,6 +69,17 @@ For the real product, secrets should be rotatable independently of Terraform —
 | `registry_password` | string | `""` | sensitive; supply via `TF_VAR_registry_password` |
 | `vnet_address_space` | string | `10.60.0.0/16` | `/22` or larger |
 | `tags` | map(string) | — | **must** include non-empty `owner` and `costCenter` |
+| `module_version` | string | — | the release in the source's `?ref=`, without the `v` (`0.4.0`); must equal the module's own version or the plan fails |
+
+### What every resource is tagged with
+
+Besides `owner` and `costCenter`, every resource carries `managedBy`, `module`, `environment`, `deployment`,
+**`aaasModule`** (`app-stack@0.4.0`) and **`archetype`** (`web-app-with-data`). They answer "what does each estate
+run" from Azure metadata alone (OQ-16): `az resource list --tag archetype=web-app-with-data`.
+
+Releasing: bump `local.module_version` in `main.tf` in the commit you tag, and tag it `v` + that version. A
+deployment pins both (`?ref=v0.4.0` and `module_version = "0.4.0"`); if the release forgot the bump, every plan
+against it fails on the resource group's precondition instead of tagging the estate with the wrong version.
 
 ### Sizing guidance for the agent
 
